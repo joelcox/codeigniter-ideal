@@ -14,7 +14,9 @@
 class Ideal {
 
 	/**
-	 * @var	holds the CodeIgniter super object
+	 * Holds the CodeIgniter super object
+	 *
+	 * @var	object
 	 */
 	private $_ci;
 	
@@ -38,15 +40,25 @@ class Ideal {
 		// Load all config items
 		$this->_ci->load->config('ideal');
 		
-		// Set payment time
-		$this->valid_until = time() + $this->_ci->config->item('ideal_valid_until');
-	
+		// Is our certificate path valid?
+		if ( ! file_exists($this->_ci->config->item('ideal_root_public_certs')))
+		{
+			show_error('CA root certificates not found. Please <a href="http://curl.haxx.se/ca/cacert.pem">download</a> a bundle of public root certificates and/or specify its location in config/ideal.php');
+		}
+		
+		// Load Phil's cURL library as a Spark or the normal way
+		if (method_exists($this->_ci->load, 'spark'))
+		{
+			$this->_ci->load->spark('curl/1.0.0');
+		}
+		
+		$this->_ci->load->library('curl');			
 	}
 	
 	/**
-	 * Directory request
+	 * Get directory
 	 *
-	 * Requests a directory with available banks
+	 * Requests a directory with available banks.
 	 * @return 	array
 	 */
 	public function get_directory()
@@ -59,7 +71,8 @@ class Ideal {
 		    return $issuers;
 		}	
 		
-		$timestamp = date('Y-m-d\TH:i:s') . '.0Z';	
+		$timestamp = date('Y-m-d\TH:i:s') . '.0Z';
+		$signature = $this->_get_signature($timestamp, $this->_ci->config->item('ideal_merchant_id'), $this->_ci->config->item('ideal_sub_id'));
 				
 		$xml = '<?xml version="1.0" encoding="UTF-8"?>' . self::NEW_LINE;
 		$xml .= '<DirectoryReq xmlns="http://www.idealdesk.com/Message" version="1.1.0">' . self::NEW_LINE;
@@ -69,7 +82,7 @@ class Ideal {
 		$xml .= '<subID>' . $this->_ci->config->item('ideal_sub_id') . '</subID> ' . self::NEW_LINE;
 		$xml .= '<authentication>SHA1_RSA</authentication>' . self::NEW_LINE;
 		$xml .= '<token>' . $this->_get_fingerprint() . '</token>' . self::NEW_LINE;
-		$xml .= '<tokenCode>' . $this->_get_signature($timestamp, $this->_ci->config->item('ideal_merchant_id'), $this->_ci->config->item('ideal_sub_id')) . '</tokenCode>' . self::NEW_LINE;
+		$xml .= '<tokenCode>' . $signature . '</tokenCode>' . self::NEW_LINE;
 		$xml .= '</Merchant>' . self::NEW_LINE;
 		$xml .= '</DirectoryReq>' . self::NEW_LINE;
 			
@@ -100,15 +113,17 @@ class Ideal {
 	}
 	
 	/**
-	 * Create a new transaction
+	 * Set transaction
+	 *
+	 * Create a new transaction.
 	 * @param	int		identifier for the issuer (bank)
-	 * @param	int		price in cents
 	 * @param	string	internal identifier for purchases
 	 * @param	string	unique entrance code
+	 * @param	int		price in cents
 	 * @param	string	description for the purchase
-	 * @return
+	 * @return 	array
 	 */
-	public function get_transaction($issuer_id, $amount, $purchase_id, $entrance_code, $description)
+	public function set_transaction($issuer_id, $purchase_id, $entrance_code, $amount, $description)
 	{
 		
 		$timestamp = date('Y-m-d\TH:i:s') . '.0Z';
@@ -148,7 +163,13 @@ class Ideal {
 		
 	}
 	
-	
+	/**
+	 * Get status
+	 * 
+	 * Get the status of a specific transaction.
+	 * @param 	int		identifier for the transaction
+	 * @return 	string
+	 */
 	public function get_status($transaction_id)
 	{
 		
@@ -169,7 +190,7 @@ class Ideal {
 		$xml .= '<transactionID>' . $transaction_id . '</transactionID>' . self::NEW_LINE;
 		$xml .= '</Transaction>' . self::NEW_LINE;
 		$xml .= '</AcquirerStatusReq>' . self::NEW_LINE;
-		
+
 		$tree = $this->_request($xml);
 				
 		if ($this->_verify_response($tree) === FALSE)
@@ -183,20 +204,22 @@ class Ideal {
 	}
 	
 	/**
-	 * Get the fingerprint from the public certificate
+	 * Get fingerprint
+	 *
+	 * Get the fingerprint from the public certificate.
 	 * @param 	the owner of the certificate, merchant or issuer
 	 * @return 	string
 	 */
 	protected function _get_fingerprint($owner = 'merchant')
 	{
 		
-		if ( ! file_exists($this->_ci->config->item('ideal_' . $owner . '_public_key')))
+		if ( ! file_exists($this->_ci->config->item('ideal_' . $owner . '_public_cert')))
 		{
 			show_error('Public key certificate could not be found.');
 		}
 		
 		// Open up the cert and extract the key
-		$resource = openssl_x509_read(file_get_contents($this->_ci->config->item('ideal_' . $owner . '_public_key')));
+		$resource = openssl_x509_read(file_get_contents($this->_ci->config->item('ideal_' . $owner . '_public_cert')));
 		openssl_x509_export($resource, $key);
 		
 		$key = str_replace('-----BEGIN CERTIFICATE-----', '', $key);
@@ -207,6 +230,8 @@ class Ideal {
 	}
 	
 	/**
+	 * Get signature
+	 *
 	 * Create a base64 encoded signature from n number of arguments
 	 * @param	mixed	n amount of arguments
 	 * @return 	string
@@ -215,22 +240,17 @@ class Ideal {
 	{
 		
 		$args = func_get_args();
-		$message = '';
-		
-		foreach ($args as $arg)
-		{
-			$message .= $arg;	
-		}
+		$message = @implode('', $args);
 
 		$whitespace = array("\t", "\n", "\r", " ");
 		$message = str_replace($whitespace, '', html_entity_decode($message));
 
-		if ( ! $resource = file_get_contents($this->_ci->config->item('ideal_merchant_private_key')))
+		if ( ! $resource = file_get_contents($this->_ci->config->item('ideal_merchant_private_cert')))
 		{
 			show_error('Private key certificate could not be found.');
 		}
 				
-		if ( ! $key = openssl_get_privatekey($resource, $this->_ci->config->item('ideal_merchant_private_key_pass')))
+		if ( ! $key = openssl_get_privatekey($resource, $this->_ci->config->item('ideal_merchant_private_cert_pass')))
 		{
 			show_error('Private key certificate password is incorrect.');
 		}
@@ -242,6 +262,8 @@ class Ideal {
 	}
 	
 	/**
+	 * Verify signature
+	 *
 	 * Verify a signature from a message using a public certificate
 	 * @param 	string	signature to be verified
 	 * @param 	array 	pieces to be concetenated
@@ -249,14 +271,9 @@ class Ideal {
 	 */
 	public function _verify_signature($signature, $data)
 	{
-		$message = '';
+		$message = implode('', $data);
 		
-		foreach ($data as $items)
-		{
-			$message .= (string) $items;	
-		}
-		
-		if ( ! $resource = file_get_contents($this->_ci->config->item('ideal_issuer_public_key')))
+		if ( ! $resource = file_get_contents($this->_ci->config->item('ideal_issuer_public_cert')))
 		{
 			show_error('Public key certificate could not be found.');
 		}
@@ -267,6 +284,8 @@ class Ideal {
 	}
 	
 	/**
+	 * Verify response
+	 *
 	 * Verify the response from the issuer
 	 * @param	object	a parsed XML document
 	 * @return 	bool
@@ -299,17 +318,19 @@ class Ideal {
 	}
 	
 	/**
+	 * Request
+	 * 
 	 * Make a request to the XML API
 	 * @param 	string	a formatted XML documented
-	 * @param	object	a parsed XML tree
+	 * @return	object	a parsed XML tree
 	 */
 	protected function _request($data)
 	{
-		
-		$this->_ci->load->library('curl');
-		$this->_ci->curl->create($this->_ci->config->item('ideal_endpoint'))->ssl(FALSE);
-		$this->_ci->curl->post($data);		
-		
+		// Make sure we POST the data over SSL.
+		$this->_ci->curl->create($this->_ci->config->item('ideal_endpoint'));
+		$this->_ci->curl->ssl(TRUE, 2, $this->_ci->config->item('ideal_root_public_certs'));
+		$this->_ci->curl->post($data);
+
 		// Did we get a proper response?
 		if ($data = $this->_ci->curl->execute())
 		{		
@@ -324,7 +345,7 @@ class Ideal {
 			log_message('error', 'iDeal error: ' . (string) $xml->Error->errorCode . ' - ' . (string) $xml->Error->errorMessage . '. ' . (string) $xml->Error->errorDetail);
 		}
 			
-		show_error('Couldn\'t properly connect to payment gateway.');
+		show_error('Couldn\'t properly connect to the payment gateway.');
 		
 	}
 	

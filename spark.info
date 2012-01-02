@@ -2,5 +2,6 @@
 name: ideal
 version: 0.1.0
 compatibility: 2.0.0
-dependencies: []
+dependencies:
+    curl: 1.0.0
 tags: ["online payment", "bank transfer"]
